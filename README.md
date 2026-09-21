@@ -13,11 +13,13 @@ Switch profiles with **1 command** without losing your active sessions or openin
 
 ## ⚡ Features
 
-- **🚀 1-Command Fast Switch**: Switch between accounts instantly (`agyacc work` or `agyacc personal`).
-- **🛡️ Crash-Proof Shutdown**: Uses native AppleScript events to gracefully quit Antigravity, preventing language server disconnects and unexpected server crashes.
-- **🔒 Secure by Design**: Stored tokens are backed up locally with strict permissions (`chmod 600`) and managed via native **macOS Keychain** (`security`). Zero external network calls.
-- **🔄 No Browser Re-Login**: Tokens are saved locally, eliminating repetitive OAuth browser pop-ups.
-- **🎨 Modern CLI Experience**: ANSI colored terminal output, interactive confirmations, active profile indicators (`● active`), and intuitive subcommand syntax.
+- **🚀 1-Command Fast Switch**: Switch between accounts instantly by profile name (`agyacc work`), full email (`agyacc user@gmail.com`), or email username (`agyacc user`).
+- **📧 Smart Email Resolution**: Automatically maps email addresses and prefixes to the correct saved profile—no need to remember exact custom profile names.
+- **🔄 Dual-Sync Session Management**: Keeps both the **macOS Keychain** (`security`) and local on-disk OAuth cache (`~/.gemini/jetski-standalone-oauth-token`) synchronized to prevent session rollbacks or auto-login loops.
+- **🛡️ Crash-Proof & Multi-User Safe**: Uses native AppleScript events with user-isolated process management (`-u $UID`), preventing cross-user conflicts on shared MacBooks with Fast User Switching.
+- **✨ Auto-Refresh Resilient Status**: Decodes token claims and refresh tokens so the active indicator (`● active`) remains accurate even after Google auto-refreshes the OAuth access token.
+- **🔒 Secure by Design**: Stored tokens are backed up locally with strict permissions (`chmod 600`). Zero external network calls or tracking.
+- **🎨 Modern CLI Experience**: ANSI colored terminal output, clean subcommand syntax, and linked email display in profile lists.
 
 ---
 
@@ -56,11 +58,11 @@ agyacc save work
 ```
 
 ### Step 2: Clear Session & Login with 2nd Account
-Clear the current Keychain credentials to prepare for the second login:
+Clear the current credentials to prepare for the second login:
 ```bash
 agyacc new
 ```
-Antigravity will relaunch. Complete the normal sign-in flow in the browser with your secondary Google account.
+Antigravity will relaunch with a clean slate. Complete the normal sign-in flow in your browser with your secondary Google account.
 
 ### Step 3: Save your 2nd Account
 Once signed in, save this session:
@@ -72,14 +74,23 @@ agyacc save personal
 
 ## 🪄 Instant Switching
 
-Now you are fully configured! Switch accounts anytime using a single command:
+Switch accounts anytime using any of the following formats:
 
 ```bash
-agyacc work      # Instantly switches to the 'work' profile
-agyacc personal  # Instantly switches to the 'personal' profile
+# By profile name:
+agyacc work
+agyacc personal
+
+# By full Google email address:
+agyacc john.doe@gmail.com
+
+# By email username (prefix before @):
+agyacc john.doe
 ```
 
-You can also view all saved profiles and see which one is currently active:
+### Check Active Profile & Accounts:
+Run `agyacc` with no arguments to view all profiles, associated Google accounts, and the currently active session:
+
 ```bash
 agyacc
 ```
@@ -88,12 +99,12 @@ Example output:
 ```text
 Available Profiles:
 ----------------------------------------
-  ● personal (active)
-    work
+    personal (john.personal@gmail.com)
+  ● work (john.work@gmail.com) (active)
 ----------------------------------------
 
 Current Session Status:
-  Active Profile : personal
+  Active Profile : work (john.work@gmail.com)
 ```
 
 ---
@@ -102,14 +113,14 @@ Current Session Status:
 
 | Command | Description |
 | :--- | :--- |
-| `agyacc <profile>` | Fast-switch directly to the specified profile. |
-| `agyacc` or `agyacc list` | List all saved profiles with current active status. |
-| `agyacc save <name>` | Save current Keychain session under `<name>`. |
-| `agyacc switch <name>` | Switch to `<name>` and relaunch Antigravity. |
-| `agyacc new` | Clear current credentials and prepare for a fresh login. |
-| `agyacc rm <name>` | Delete a saved profile. |
+| `agyacc <name\|email>` | Fast-switch directly by profile name, full email, or username prefix. |
+| `agyacc` or `agyacc list` | List all saved profiles with linked Google emails and active status. |
+| `agyacc save <name>` | Save current login session under `<name>`. |
+| `agyacc switch <name\|email>` | Switch to account and relaunch Antigravity. |
+| `agyacc new` | Clear all Keychain and on-disk session tokens for a clean login. |
+| `agyacc rm <name\|email>` | Delete a saved profile. |
 | `agyacc rename <old> <new>` | Rename an existing profile. |
-| `agyacc status` | Display the currently active profile name. |
+| `agyacc status` | Display the currently active profile and linked email. |
 | `agyacc version` | Display tool version. |
 | `agyacc help` | Show help and usage instructions. |
 
@@ -117,10 +128,10 @@ Current Session Status:
 
 ## ⚙️ How It Works Under the Hood
 
-1. **Keychain Integration**: Antigravity on macOS stores auth session tokens inside the macOS Keychain under service `gemini` and account `antigravity`.
-2. **Session Persistence**: When you run `agyacc save <name>`, the token is extracted using `security find-generic-password` and stored inside a protected directory (`~/.config/antigravity_profiles/` with `chmod 600`).
-3. **Graceful App Restart**: Upon switching, `agyacc` instructs Antigravity to quit gracefully via AppleScript (`osascript -e 'quit app "Antigravity"'`), ensuring child processes and language servers terminate cleanly without corrupting open workspaces or displaying server crash alerts.
-4. **Credential Swap**: It updates the Keychain entry with `security add-generic-password -U` and relaunches the application with the new credentials loaded.
+1. **Keychain & Token Cache Integration**: Antigravity stores OAuth tokens in macOS Keychain (`service: "gemini"`, `account: "antigravity"` via Go keyring base64) and mirrors them in `~/.gemini/jetski-standalone-oauth-token`.
+2. **Session Persistence**: When running `agyacc save <name>`, the token payload is stored inside a protected directory (`~/.antigravity_profiles/` with `chmod 600`).
+3. **Dual-Sync on Switch**: Upon switching, `agyacc` updates both the macOS Keychain and decodes the payload into `~/.gemini/jetski-standalone-oauth-token`, ensuring both the language server and the Electron UI read the exact same credentials.
+4. **Graceful App Restart**: Signals Antigravity to quit gracefully via AppleScript, waits until the process has completely deregistered from LaunchServices, and relaunches the app.
 
 ---
 

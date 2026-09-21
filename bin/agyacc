@@ -8,6 +8,8 @@
 
 set -euo pipefail
 
+VERSION="1.1.0"
+
 # Configuration
 SERVICE="gemini"
 ACCOUNT="antigravity"
@@ -17,7 +19,7 @@ if [ -d "$HOME/.antigravity_profiles" ] && [ ! -d "$PROFILES_DIR" ]; then
     PROFILES_DIR="$HOME/.antigravity_profiles"
 fi
 
-# Styling & Colors
+# Styling & Colors (ANSI-C Quoted)
 if [ -t 1 ]; then
     BOLD=$'\033[1m'
     GREEN=$'\033[0;32m'
@@ -51,23 +53,24 @@ get_current_token() {
 terminate_antigravity() {
     log_info "Closing Antigravity gracefully..."
 
-    # Gracefully terminate Antigravity via AppleScript so child processes (language servers) clean up properly
-    osascript -e 'quit app "Antigravity"' 2>/dev/null || killall "Antigravity" 2>/dev/null || true
+    # Gracefully terminate via AppleScript or kill signals targeting the current user
+    osascript -e 'tell application "Antigravity" to quit' 2>/dev/null || pkill -u "$UID" -f "Antigravity" 2>/dev/null || true
+    pkill -u "$UID" -f "language_server" 2>/dev/null || true
 
-    # Wait until the main process exits
+    # Wait until current user's processes have completely exited
     local count=0
-    while pgrep -x "Antigravity" >/dev/null 2>&1 && [ $count -lt 10 ]; do
+    while pgrep -u "$UID" -f "Antigravity.app/Contents/MacOS/Antigravity" >/dev/null 2>&1 && [ $count -lt 10 ]; do
         sleep 0.5
         count=$((count + 1))
     done
 
-    # Force quit if still hanging after timeout
-    if pgrep -x "Antigravity" >/dev/null 2>&1; then
-        killall -9 "Antigravity" 2>/dev/null || true
+    # Force quit if still hanging
+    if pgrep -u "$UID" -f "Antigravity.app/Contents/MacOS/Antigravity" >/dev/null 2>&1; then
+        pkill -9 -u "$UID" -f "Antigravity" 2>/dev/null || true
         sleep 0.5
     fi
 
-    # Buffer for macOS to complete process deregistration
+    # Extra buffer for macOS LaunchServices to complete process deregistration
     sleep 1.5
 }
 
@@ -76,6 +79,75 @@ launch_antigravity() {
     open -a "/Applications/Antigravity.app" 2>/dev/null || open -a "Antigravity" 2>/dev/null || {
         log_warn "Could not automatically launch Antigravity. Please open it manually from Applications."
     }
+}
+
+resolve_profile() {
+    local query="$1"
+
+    # Direct file match
+    if [ -f "$PROFILES_DIR/$query" ]; then
+        echo "$query"
+        return 0
+    fi
+
+    # Smart match via python (email, email prefix, case-insensitive profile name)
+    local match
+    match=$(/usr/bin/python3 - "$PROFILES_DIR" "$query" 2>/dev/null << 'PYEOF'
+import sys, os, json, base64
+
+profiles_dir = sys.argv[1]
+query = sys.argv[2].strip().lower()
+
+def extract_email(path):
+    try:
+        with open(path) as f:
+            raw = f.read().strip()
+        if raw.startswith("go-keyring-base64:"):
+            raw = raw[18:]
+        data = json.loads(base64.b64decode(raw).decode("utf-8", "ignore"))
+        idt = data.get("id_token", "")
+        if idt and "." in idt:
+            payload = idt.split(".")[1] + "=="
+            claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "ignore"))
+            return claims.get("email", "").lower()
+    except Exception:
+        pass
+    return ""
+
+files = [f for f in os.listdir(profiles_dir) if not f.startswith(".") and os.path.isfile(os.path.join(profiles_dir, f))]
+
+# Case-insensitive filename match
+for f in files:
+    if f.lower() == query:
+        print(f)
+        sys.exit(0)
+
+# Email or email-prefix match
+matches = []
+for f in files:
+    email = extract_email(os.path.join(profiles_dir, f))
+    if not email:
+        continue
+    prefix = email.split("@")[0]
+    if query == email or query == prefix:
+        matches.append(f)
+
+if len(matches) == 1:
+    print(matches[0])
+    sys.exit(0)
+elif len(matches) > 1:
+    sys.exit(2)
+else:
+    sys.exit(1)
+PYEOF
+    ) || true
+
+    if [ -n "$match" ]; then
+        echo "$match"
+        return 0
+    fi
+
+    return 1
 }
 
 # Commands
@@ -91,8 +163,17 @@ cmd_save() {
     local token
     token="$(get_current_token)"
 
+    # Fallback: if Keychain is empty, check ~/.gemini/jetski-standalone-oauth-token
+    if [ -z "$token" ] && [ -f "$HOME/.gemini/jetski-standalone-oauth-token" ]; then
+        local b64
+        b64=$(base64 < "$HOME/.gemini/jetski-standalone-oauth-token" | tr -d '\n')
+        if [ -n "$b64" ]; then
+            token="go-keyring-base64:$b64"
+        fi
+    fi
+
     if [ -z "$token" ]; then
-        log_error "No active Antigravity session found in macOS Keychain."
+        log_error "No active Antigravity session found in macOS Keychain or disk."
         log_info "Please log in to Antigravity first before saving."
         exit 1
     fi
@@ -107,27 +188,29 @@ cmd_save() {
     fi
 
     echo "$token" > "$target_file"
+    echo "$profile_name" > "$PROFILES_DIR/.active" 2>/dev/null || true
     chmod 600 "$target_file"
     log_success "Session successfully saved as: ${BOLD}$profile_name${RESET}"
 }
 
 cmd_switch() {
-    local profile_name="${1:-}"
-    if [ -z "$profile_name" ]; then
-        log_error "Missing profile name."
-        printf "Usage: %bagyacc <profile_name>%b or %bagyacc switch <profile_name>%b\n" "${BOLD}" "${RESET}" "${BOLD}" "${RESET}"
+    local input="${1:-}"
+    if [ -z "$input" ]; then
+        log_error "Missing profile name or email."
+        printf "Usage: %bagyacc <name|email>%b or %bagyacc switch <name|email>%b\n" "${BOLD}" "${RESET}" "${BOLD}" "${RESET}"
         exit 1
     fi
 
-    local target_file="$PROFILES_DIR/$profile_name"
-    if [ ! -f "$target_file" ]; then
-        log_error "Profile '${BOLD}$profile_name${RESET}' does not exist."
-        log_info "To save your current session as '$profile_name', run: agyacc save $profile_name"
+    local profile_name
+    if ! profile_name="$(resolve_profile "$input")"; then
+        log_error "Profile or email '${BOLD}$input${RESET}' not found."
+        log_info "To save your current session as '$input', run: agyacc save $input"
         echo ""
         cmd_list
         exit 1
     fi
 
+    local target_file="$PROFILES_DIR/$profile_name"
     local token
     token="$(cat "$target_file")"
 
@@ -136,6 +219,15 @@ cmd_switch() {
     log_info "Updating Keychain credentials for: ${BOLD}$profile_name${RESET}..."
     security add-generic-password -U -s "$SERVICE" -a "$ACCOUNT" -w "$token" 2>/dev/null
 
+    # Sync on-disk token file so language_server and Electron don't fall back to old session
+    if [[ "$token" == go-keyring-base64:* ]]; then
+        local b64="${token#go-keyring-base64:}"
+        mkdir -p "$HOME/.gemini"
+        printf "%s" "$b64" | (base64 -D 2>/dev/null || base64 --decode 2>/dev/null || base64 -d 2>/dev/null) > "$HOME/.gemini/jetski-standalone-oauth-token" 2>/dev/null || true
+        chmod 600 "$HOME/.gemini/jetski-standalone-oauth-token" 2>/dev/null || true
+    fi
+
+    echo "$profile_name" > "$PROFILES_DIR/.active" 2>/dev/null || true
     launch_antigravity
     log_success "Switched to: ${BOLD}$profile_name${RESET}"
 }
@@ -152,6 +244,12 @@ cmd_new() {
     log_info "Clearing Keychain credentials..."
     security delete-generic-password -s "$SERVICE" -a "$ACCOUNT" 2>/dev/null || true
 
+    log_info "Clearing on-disk session tokens..."
+    rm -f "$HOME/.gemini/jetski-standalone-oauth-token"
+    rm -f "$HOME/.gemini/google_accounts.json"
+    rm -f "$HOME/.gemini/oauth_creds.json"
+    rm -f "$PROFILES_DIR/.active" 2>/dev/null || true
+
     launch_antigravity
     log_success "Session reset complete."
     printf "👉 Log in to Antigravity, then save this profile: %bagyacc save <name>%b\n" "${BOLD}" "${RESET}"
@@ -159,8 +257,6 @@ cmd_new() {
 
 cmd_list() {
     ensure_dir
-    local current_token
-    current_token="$(get_current_token)"
 
     local profiles
     profiles=$(find "$PROFILES_DIR" -maxdepth 1 -type f ! -name ".*" -exec basename {} \; 2>/dev/null | sort || true)
@@ -174,57 +270,161 @@ cmd_list() {
     printf "%bAvailable Profiles:%b\n" "${BOLD}" "${RESET}"
     printf "%b----------------------------------------%b\n" "${DIM}" "${RESET}"
 
-    while IFS= read -r profile; do
-        local profile_token
-        profile_token="$(cat "$PROFILES_DIR/$profile" 2>/dev/null || true)"
-        if [ -n "$current_token" ] && [ "$profile_token" = "$current_token" ]; then
-            printf "  %b● %b%s%b %b(active)%b\n" "${GREEN}" "${BOLD}" "$profile" "${RESET}" "${CYAN}" "${RESET}"
-        else
-            printf "    %s\n" "$profile"
-        fi
-    done <<< "$profiles"
+    /usr/bin/python3 - "$PROFILES_DIR" "$SERVICE" "$ACCOUNT" << 'PYEOF'
+import sys, os, json, base64, subprocess
+
+profiles_dir = sys.argv[1]
+service = sys.argv[2]
+account = sys.argv[3]
+
+def extract_info(raw):
+    if not raw: return None
+    if raw.startswith("go-keyring-base64:"):
+        raw = raw[18:]
+    try:
+        data = json.loads(base64.b64decode(raw).decode("utf-8", "ignore"))
+        email = None
+        idt = data.get("id_token", "")
+        if idt and "." in idt:
+            payload = idt.split(".")[1] + "=="
+            claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "ignore"))
+            email = claims.get("email")
+        rt = data.get("token", {}).get("refresh_token")
+        return {"email": email, "refresh_token": rt}
+    except Exception:
+        return None
+
+kc_info = None
+try:
+    token_kc = subprocess.check_output(["security", "find-generic-password", "-s", service, "-a", account, "-w"], stderr=subprocess.DEVNULL).decode().strip()
+    kc_info = extract_info(token_kc)
+except Exception:
+    pass
+
+active_file = os.path.join(profiles_dir, ".active")
+last_active = ""
+if os.path.exists(active_file):
+    with open(active_file) as f:
+        last_active = f.read().strip()
+
+files = sorted([f for f in os.listdir(profiles_dir) if not f.startswith(".") and os.path.isfile(os.path.join(profiles_dir, f))])
+
+BOLD = "\033[1m"
+GREEN = "\033[0;32m"
+CYAN = "\033[0;36m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+for p in files:
+    p_path = os.path.join(profiles_dir, p)
+    with open(p_path) as f:
+        p_raw = f.read().strip()
+    p_info = extract_info(p_raw)
+    email_str = f" {DIM}({p_info['email']}){RESET}" if (p_info and p_info.get("email")) else ""
+
+    is_active = False
+    if kc_info and p_info:
+        if (kc_info.get("refresh_token") and kc_info["refresh_token"] == p_info.get("refresh_token")) or \
+           (kc_info.get("email") and kc_info["email"] == p_info.get("email")):
+            is_active = True
+    elif last_active and last_active == p:
+        is_active = True
+
+    if is_active:
+        print(f"  {GREEN}● {BOLD}{p}{RESET}{email_str} {CYAN}(active){RESET}")
+    else:
+        print(f"    {p}{email_str}")
+PYEOF
 
     printf "%b----------------------------------------%b\n" "${DIM}" "${RESET}"
 }
 
 cmd_status() {
-    local current_token
-    current_token="$(get_current_token)"
-
-    if [ -z "$current_token" ]; then
-        log_warn "No active Antigravity session found in Keychain."
-        return 0
-    fi
-
     ensure_dir
-    local matched_profile=""
-    for file in "$PROFILES_DIR"/*; do
-        [ -f "$file" ] || continue
-        if [ "$(cat "$file" 2>/dev/null)" = "$current_token" ]; then
-            matched_profile="$(basename "$file")"
-            break
-        fi
-    done
+    /usr/bin/python3 - "$PROFILES_DIR" "$SERVICE" "$ACCOUNT" << 'PYEOF'
+import sys, os, json, base64, subprocess
 
-    printf "%bCurrent Session Status:%b\n" "${BOLD}" "${RESET}"
-    if [ -n "$matched_profile" ]; then
-        printf "  Active Profile : %b%b%s%b\n" "${GREEN}" "${BOLD}" "$matched_profile" "${RESET}"
-    else
-        printf "  Active Profile : %bUnsaved Session%b (Run 'agyacc save <name>' to save)\n" "${YELLOW}" "${RESET}"
-    fi
+profiles_dir = sys.argv[1]
+service = sys.argv[2]
+account = sys.argv[3]
+
+def extract_info(raw):
+    if not raw: return None
+    if raw.startswith("go-keyring-base64:"):
+        raw = raw[18:]
+    try:
+        data = json.loads(base64.b64decode(raw).decode("utf-8", "ignore"))
+        email = None
+        idt = data.get("id_token", "")
+        if idt and "." in idt:
+            payload = idt.split(".")[1] + "=="
+            claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8", "ignore"))
+            email = claims.get("email")
+        rt = data.get("token", {}).get("refresh_token")
+        return {"email": email, "refresh_token": rt}
+    except Exception:
+        return None
+
+try:
+    token_kc = subprocess.check_output(["security", "find-generic-password", "-s", service, "-a", account, "-w"], stderr=subprocess.DEVNULL).decode().strip()
+    kc_info = extract_info(token_kc)
+except Exception:
+    kc_info = None
+
+BOLD = "\033[1m"
+GREEN = "\033[0;32m"
+YELLOW = "\033[0;33m"
+CYAN = "\033[0;36m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+if not kc_info:
+    print(f"{YELLOW}[WARN]{RESET} No active Antigravity session found in Keychain.")
+    sys.exit(0)
+
+active_file = os.path.join(profiles_dir, ".active")
+last_active = ""
+if os.path.exists(active_file):
+    with open(active_file) as f:
+        last_active = f.read().strip()
+
+matched_profile = ""
+files = [f for f in os.listdir(profiles_dir) if not f.startswith(".") and os.path.isfile(os.path.join(profiles_dir, f))]
+for p in files:
+    with open(os.path.join(profiles_dir, p)) as f:
+        p_raw = f.read().strip()
+    p_info = extract_info(p_raw)
+    if p_info:
+        if (kc_info.get("refresh_token") and kc_info["refresh_token"] == p_info.get("refresh_token")) or \
+           (kc_info.get("email") and kc_info["email"] == p_info.get("email")):
+            matched_profile = p
+            break
+if not matched_profile and last_active:
+    matched_profile = last_active
+
+print(f"{BOLD}Current Session Status:{RESET}")
+email_str = f" {DIM}({kc_info['email']}){RESET}" if kc_info.get("email") else ""
+if matched_profile:
+    print(f"  Active Profile : {GREEN}{BOLD}{matched_profile}{RESET}{email_str}")
+else:
+    print(f"  Active Profile : {YELLOW}Unsaved Session{RESET}{email_str} (Run 'agyacc save <name>' to save)")
+PYEOF
 }
 
 cmd_delete() {
-    local profile_name="${1:-}"
-    if [ -z "$profile_name" ]; then
-        log_error "Missing profile name."
-        printf "Usage: %bagyacc rm <profile_name>%b\n" "${BOLD}" "${RESET}"
+    local input="${1:-}"
+    if [ -z "$input" ]; then
+        log_error "Missing profile name or email."
+        printf "Usage: %bagyacc rm <name|email>%b\n" "${BOLD}" "${RESET}"
         exit 1
     fi
 
+    local profile_name
+    profile_name="$(resolve_profile "$input" 2>/dev/null || echo "$input")"
+
     local target_file="$PROFILES_DIR/$profile_name"
     if [ ! -f "$target_file" ]; then
-        log_error "Profile '$profile_name' not found."
+        log_error "Profile or email '$input' not found."
         exit 1
     fi
 
@@ -264,38 +464,42 @@ cmd_rename() {
 }
 
 cmd_version() {
-    printf "%bagyacc%b version %b1.0.0%b (macOS)\n" "${BOLD}" "${RESET}" "${GREEN}" "${RESET}"
+    echo "agyacc v${VERSION}"
 }
 
 cmd_help() {
     cat << EOF
-${BOLD}Antigravity Account Switcher for macOS (agyacc)${RESET}
+${BOLD}Antigravity Account Switcher for macOS (agyacc) v${VERSION}${RESET}
+Seamlessly manage and switch between multiple Antigravity accounts.
 
-${BOLD}USAGE:${RESET}
-  ${GREEN}agyacc <profile>${RESET}         Directly switch to a profile (e.g. ${CYAN}agyacc personal${RESET}, ${CYAN}agyacc work${RESET})
+${BOLD}FAST SWITCH:${RESET}
+  ${GREEN}agyacc <profile|email>${RESET}   Directly switch to a profile by name or email
+                               Examples:
+                                 ${CYAN}agyacc work${RESET}
+                                 ${CYAN}agyacc user@gmail.com${RESET}
+                                 ${CYAN}agyacc username${RESET}
 
 ${BOLD}COMMANDS:${RESET}
-  ${GREEN}agyacc${RESET}                   Show profile list and current active status
-  ${GREEN}agyacc save <name>${RESET}     Save current login session under a profile name
-  ${GREEN}agyacc switch <name>${RESET}   Switch to an existing saved profile
+  ${GREEN}agyacc${RESET}                   Show profile list and active status
+  ${GREEN}agyacc save <name>${RESET}     Save current session under a profile name
   ${GREEN}agyacc new${RESET}               Clear session to log in with a new account
-  ${GREEN}agyacc rm <name>${RESET}        Delete a saved profile
-  ${GREEN}agyacc rename <old> <new>${RESET} Rename a saved profile
+  ${GREEN}agyacc rm <name|email>${RESET}   Delete a saved profile
   ${GREEN}agyacc status${RESET}            Show currently active profile
-  ${GREEN}agyacc version${RESET}           Show version information
+  ${GREEN}agyacc rename <old> <new>${RESET} Rename a profile
+  ${GREEN}agyacc version${RESET}           Show version
   ${GREEN}agyacc help${RESET}              Show this help menu
 
-${BOLD}WORKFLOW:${RESET}
-  1. Login to your 1st account in Antigravity.
-  2. Run: ${CYAN}agyacc save work${RESET}
-  3. Run: ${CYAN}agyacc new${RESET} (Logs out session & restarts Antigravity).
-  4. Login to your 2nd account in Antigravity.
-  5. Run: ${CYAN}agyacc save personal${RESET}
-  6. Switch anytime without browser visits: ${CYAN}agyacc work${RESET} or ${CYAN}agyacc personal${RESET}
+${BOLD}EXAMPLES:${RESET}
+  agyacc save work              # Save current login as 'work'
+  agyacc new                    # Clear and log in to another account
+  agyacc save personal          # Save that login as 'personal'
+  agyacc work                   # Instantly switch to 'work'
+  agyacc personal               # Instantly switch to 'personal'
+  agyacc john.doe@gmail.com     # Switch directly by email address
 EOF
 }
 
-# Entrypoint
+# If called without arguments, show profile list and status
 if [ $# -eq 0 ]; then
     cmd_list
     echo ""
