@@ -5,6 +5,7 @@
 #
 # Repository: https://github.com/mak0099/antigravity-account-switcher-macos
 # License: MIT
+# Disclaimer: Unofficial utility. Not affiliated with or endorsed by Google LLC.
 
 set -euo pipefail
 

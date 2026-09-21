@@ -150,6 +150,16 @@ sudo rm -f /usr/local/bin/agyacc
 
 ---
 
+## ⚖️ Disclaimer
+
+This project (`agyacc`) is an independent, unofficial open-source developer utility created for productivity and local profile management.
+
+- **Not Affiliated with Google**: This tool is not affiliated with, authorized, maintained, sponsored, or endorsed by Google LLC, Alphabet Inc., or any of their affiliates. "Google", "Antigravity", and related trademarks belong to their respective owners.
+- **Terms of Service Compliance**: This utility is intended strictly for managing legitimate developer accounts (such as switching between personal and organizational Google accounts) without repetitive browser sign-in prompts. Users are solely responsible for using this utility in compliance with [Google's Terms of Service](https://policies.google.com/terms) and applicable product guidelines.
+- **Security & Privacy**: All account credentials and session tokens are stored **strictly on your local machine** using native macOS Keychain encryption and user-restricted file permissions (`chmod 600`). This utility transmits **zero data**, conducts no telemetry, and makes no external network requests.
+
+---
+
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
