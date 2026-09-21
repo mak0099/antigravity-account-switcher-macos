@@ -1,0 +1,10 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Local session or profile backups
+*.token
+*.key
+profiles/
+.antigravity_profiles/
